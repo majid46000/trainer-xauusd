@@ -1,8 +1,6 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
-
 import numpy as np
 import optuna
 import pandas as pd
@@ -12,18 +10,15 @@ from sklearn.metrics import f1_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.class_weight import compute_class_weight
-
 from utils import CVConfig, TrainConfig
 
 try:
     import lightgbm as lgb
-
     BOOSTING_BACKEND = "lightgbm"
 except ImportError:  # pragma: no cover - optional dependency
     lgb = None
     try:
         import xgboost as xgb
-
         BOOSTING_BACKEND = "xgboost"
     except ImportError as exc:  # pragma: no cover - optional dependency
         raise ImportError("Either lightgbm or xgboost must be installed for the main model.") from exc
@@ -89,6 +84,7 @@ def train_models(
             y[tuning_train_idx],
             config,
         )
+
         model_factories = _build_model_factories(config.seed, tuned_params)
         best_params_by_strategy[strategy] = tuned_params
 
@@ -98,6 +94,7 @@ def train_models(
                 fold_idx += 1
                 X_train, X_test = X[train_idx], X[test_idx]
                 y_train, y_test = y[train_idx], y[test_idx]
+
                 model = model_factory()
                 model = _fit_model(model, model_name, X_train, y_train)
                 preds = _predict_model(model, model_name, X_test)
@@ -111,6 +108,7 @@ def train_models(
                         y_pred=preds,
                     )
                 )
+
                 fold_predictions.append(
                     FoldPrediction(
                         model=model_name,
@@ -121,6 +119,7 @@ def train_models(
                         y_pred=preds,
                     )
                 )
+
                 fold_models.append(
                     FoldModel(
                         model=model_name,
@@ -130,11 +129,17 @@ def train_models(
                     )
                 )
 
+            # ── الجزء المصحح ──
+            # كان هناك احتمال كبير لوجود \ أو مسافات خفية تسببت في الخطأ
             final_model = model_factory()
             final_model = _fit_model(final_model, model_name, X, y)
-            models[f\"{strategy}_{model_name}\"] = final_model
+
+            model_key = f"{strategy}_{model_name}"
+            models[model_key] = final_model
+            # ──────────────────────
 
     metrics = pd.DataFrame(metrics_rows)
+
     return TrainResult(
         models=models,
         metrics=metrics,
@@ -181,6 +186,7 @@ def _build_boosting_model(params: dict, seed: int) -> object:
             n_jobs=-1,
             **params,
         )
+
     return xgb.XGBClassifier(
         objective="multi:softprob",
         num_class=3,
@@ -211,20 +217,17 @@ def _fit_model(model: object, model_name: str, X_train: np.ndarray, y_train: np.
     )
     weights = {label: weight for label, weight in zip(unique_labels, class_weights)}
 
-    if model_name == "logistic_regression":
-        model.fit(X_train, y_train)
-        return model
-
-    if model_name == "random_forest":
+    if model_name in ("logistic_regression", "random_forest"):
         model.fit(X_train, y_train)
         return model
 
     if model_name == "boosting":
-        sample_weight = np.array([weights[label] for label in y_train])
+        sample_weight = np.array([weights.get(label, 1.0) for label in y_train])
         model.fit(X_train, _to_boosting_labels(y_train), sample_weight=sample_weight)
         return model
 
-    sample_weight = np.array([weights[label] for label in y_train])
+    # fallback
+    sample_weight = np.array([weights.get(label, 1.0) for label in y_train])
     model.fit(X_train, y_train, sample_weight=sample_weight)
     return model
 
@@ -248,26 +251,33 @@ def _generate_splits(n_samples: int, config: CVConfig, strategy: str) -> Iterabl
         return
 
     test_window = max(1, int((n_samples - train_window) / config.test_splits))
+
     for split in range(config.test_splits):
         train_end = train_window + split * test_window
         test_start = train_end
         test_end = min(test_start + test_window, n_samples)
+
         if test_start >= n_samples:
             break
+
         if strategy == "rolling":
             train_start = max(0, train_end - train_window)
         else:
             train_start = 0
+
         train_idx = np.arange(train_start, train_end)
         test_idx = np.arange(test_start, test_end)
+
         if len(train_idx) == 0 or len(test_idx) == 0:
             continue
+
         yield train_idx, test_idx
 
 
 def _fold_metrics(model_name: str, strategy: str, fold: int, y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     f1 = f1_score(y_true, y_pred, average="macro", zero_division=0)
     accuracy = np.mean(y_true == y_pred)
+
     return {
         "model": model_name,
         "strategy": strategy,
@@ -293,15 +303,19 @@ def _tune_boosting_model(X: np.ndarray, y: np.ndarray, config: TrainConfig) -> d
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 5.0),
         }
+
         model = _build_boosting_model(params, config.seed)
         model.fit(X_train, _to_boosting_labels(y_train))
+
         preds = _from_boosting_labels(model.predict(X_val))
         return f1_score(y_val, preds, average="macro", zero_division=0)
 
     study = optuna.create_study(
-        direction="maximize", sampler=optuna.samplers.TPESampler(seed=config.seed)
+        direction="maximize",
+        sampler=optuna.samplers.TPESampler(seed=config.seed)
     )
     study.optimize(objective, n_trials=config.optuna_trials, timeout=config.optuna_timeout)
+
     return study.best_params
 
 
