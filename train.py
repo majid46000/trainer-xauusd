@@ -52,12 +52,65 @@ class TrainResult:
     best_params: Dict[str, dict]
 
 
+def add_trend_following_features(df: pd.DataFrame) -> pd.DataFrame:
+    df['ema50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['ema200'] = df['close'].ewm(span=200, adjust=False).mean()
+    df['trend_signal'] = np.where(df['ema50'] > df['ema200'], 1, -1)
+    return df
+
+
+def add_fvg_features(df: pd.DataFrame) -> pd.DataFrame:
+    df['fvg_bull'] = (df['low'].shift(2) > df['high'].shift()) & (df['low'] > df['high'].shift())
+    df['fvg_bear'] = (df['high'].shift(2) < df['low'].shift()) & (df['high'] < df['low'].shift())
+    df['fvg_bull'] = df['fvg_bull'].astype(int)
+    df['fvg_bear'] = df['fvg_bear'].astype(int)
+    return df
+
+
+def add_breakout_features(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    df['high_roll'] = df['high'].rolling(period).max()
+    df['low_roll'] = df['low'].rolling(period).min()
+    df['breakout_up'] = (df['close'] > df['high_roll'].shift(1)).astype(int)
+    df['breakout_down'] = (df['close'] < df['low_roll'].shift(1)).astype(int)
+    return df
+
+
+def add_macro_correlation_features(df: pd.DataFrame, window: int = 20) -> pd.DataFrame:
+    # Assume df has additional macro columns like 'dxy_close', 'vix_close', 'us10y_close'
+    # If not, you need to load and merge them from external sources
+    if 'dxy_close' in df.columns:
+        df['gold_dxy_cor'] = df['close'].rolling(window).corr(df['dxy_close'])
+    if 'vix_close' in df.columns:
+        df['gold_vix_cor'] = df['close'].rolling(window).corr(df['vix_close'])
+    if 'us10y_close' in df.columns:
+        df['gold_us10y_cor'] = df['close'].rolling(window).corr(df['us10y_close'])
+    return df
+
+
 def train_models(
     df: pd.DataFrame,
     feature_columns: List[str],
     label_column: str,
     config: TrainConfig,
 ) -> TrainResult:
+    # Add advanced strategy features
+    df = add_trend_following_features(df)
+    df = add_fvg_features(df)
+    df = add_breakout_features(df)
+    df = add_macro_correlation_features(df)
+    
+    # Update feature_columns to include new features from strategies
+    new_features = [
+        'ema50', 'ema200', 'trend_signal',  # Trend Following
+        'fvg_bull', 'fvg_bear',  # SMC FVG
+        'high_roll', 'low_roll', 'breakout_up', 'breakout_down',  # Breakout
+        'gold_dxy_cor', 'gold_vix_cor', 'gold_us10y_cor'  # Macro Correlation (if macro data available)
+    ]
+    feature_columns = list(set(feature_columns + new_features) - {label_column, 'timestamp', 'future_return', 'direction_next'})
+    
+    # Drop NaNs after adding features
+    df = df.dropna().reset_index(drop=True)
+    
     X = df[feature_columns].values
     y = df[label_column].values
 
@@ -130,7 +183,6 @@ def train_models(
                 )
 
             # ── الجزء المصحح ──
-            # كان هناك احتمال كبير لوجود \ أو مسافات خفية تسببت في الخطأ
             final_model = model_factory()
             final_model = _fit_model(final_model, model_name, X, y)
 
