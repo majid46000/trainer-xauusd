@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import datetime as dt
 import os
-from dataclasses import dataclass
+import random
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -21,6 +22,20 @@ class DataConfig:
     cache_dir: Path = Path("data/cache")
     output_dir: Path = Path("data/outputs")
     price_scale: int = 1000
+    max_workers: int = 4
+    fill_method: str = "ffill"
+    timezone: str = "UTC"
+
+
+@dataclass(frozen=True)
+class FeatureConfig:
+    horizons: Sequence[int] = (1, 3, 6, 12, 24)
+    rolling_windows: Sequence[int] = (5, 10, 20, 30, 50, 100)
+    lag_windows: Sequence[int] = tuple(range(1, 31))
+    volatility_windows: Sequence[int] = (5, 10, 20, 50)
+    atr_window: int = 14
+    regime_window: int = 100
+    regime_quantiles: Sequence[float] = (0.2, 0.8)
 
 
 @dataclass(frozen=True)
@@ -29,6 +44,18 @@ class TrainConfig:
     test_splits: int = 5
     threshold: float = 0.0
     seed: int = 7
+    rolling_window: int = 4000
+    expanding_window: int = 4000
+    optuna_trials: int = 30
+    optuna_timeout: int = 600
+    ensemble_top_k: int = 2
+
+
+@dataclass(frozen=True)
+class CVConfig:
+    test_splits: int
+    rolling_window: int
+    expanding_window: int
 
 
 def ensure_dir(path: Path) -> None:
@@ -64,4 +91,21 @@ def load_cached(path: Path) -> Optional[pd.DataFrame]:
 
 def set_deterministic(seed: int) -> None:
     np.random.seed(seed)
+    random.seed(seed)
     os.environ["PYTHONHASHSEED"] = str(seed)
+
+
+def chunked(iterable: Sequence[dt.date], size: int) -> Iterable[List[dt.date]]:
+    for idx in range(0, len(iterable), size):
+        yield list(iterable[idx : idx + size])
+
+
+def safe_to_datetime(series: pd.Series, tz: str) -> pd.Series:
+    timestamp = pd.to_datetime(series, utc=True, errors="coerce")
+    return timestamp.dt.tz_convert(tz)
+
+
+def compute_drawdown(equity_curve: pd.Series) -> pd.Series:
+    running_max = equity_curve.cummax()
+    drawdown = equity_curve / running_max - 1
+    return drawdown

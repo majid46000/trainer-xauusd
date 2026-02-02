@@ -2,14 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
-
 from data_loader import DataLoader
 from evaluate import evaluate_models
 from features import add_features
 from labeling import add_labels
 from train import train_models
-from utils import DataConfig, TrainConfig, set_deterministic
+from utils import DataConfig, FeatureConfig, TrainConfig, set_deterministic
 
 
 def run_pipeline() -> None:
@@ -22,15 +20,27 @@ def run_pipeline() -> None:
         cache_dir=Path("data/cache"),
         output_dir=Path("data/outputs"),
         price_scale=1000,
+        max_workers=4,
     )
-    train_config = TrainConfig(horizon=3, test_splits=5, threshold=0.0, seed=7)
+    feature_config = FeatureConfig()
+    train_config = TrainConfig(
+        horizon=3,
+        test_splits=5,
+        threshold=0.0,
+        seed=7,
+        rolling_window=4000,
+        expanding_window=4000,
+        optuna_trials=30,
+        optuna_timeout=600,
+        ensemble_top_k=2,
+    )
     set_deterministic(train_config.seed)
 
     loader = DataLoader(data_config)
     artifacts = loader.load()
     df = artifacts.dataframe
 
-    df = add_features(df)
+    df = add_features(df, feature_config)
     df = add_labels(df, horizon=train_config.horizon, threshold=train_config.threshold)
     df = df.dropna().reset_index(drop=True)
 
@@ -43,16 +53,15 @@ def run_pipeline() -> None:
         df,
         feature_columns=feature_cols,
         label_column="label",
-        splits=train_config.test_splits,
-        seed=train_config.seed,
+        config=train_config,
     )
 
     evaluate_models(
         df,
-        models=train_result.models,
-        feature_columns=train_result.feature_columns,
+        train_result=train_result,
         label_column="label",
         output_dir=data_config.output_dir,
+        ensemble_top_k=train_config.ensemble_top_k,
     )
 
 
