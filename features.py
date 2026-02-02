@@ -1,18 +1,24 @@
 from __future__ import annotations
-
 import numpy as np
 import pandas as pd
-
 from utils import FeatureConfig
 
 
 def add_features(df: pd.DataFrame, config: FeatureConfig | None = None) -> pd.DataFrame:
+    """
+    إضافة جميع الميزات المتقدمة المستوحاة من استراتيجيات حديثة:
+    - Trend Following (EMA + breakout)
+    - SMC (FVG + Order Blocks تقريبية + Liquidity proxy)
+    - Breakout (Donchian + volatility-adjusted)
+    - Macro correlations (إذا كانت البيانات موجودة)
+    - الميزات الأصلية (returns, microstructure, rolling stats, volatility, lags, time, regime)
+    """
     config = config or FeatureConfig()
     df = df.copy()
 
+    # ── الميزات الأساسية الأصلية ──
     df["return"] = df["close"].pct_change()
     df["log_return"] = np.log(df["close"]).diff()
-
     _add_multi_horizon_returns(df, config.horizons)
     _add_microstructure_features(df)
     _add_rolling_statistics(df, config)
@@ -21,7 +27,13 @@ def add_features(df: pd.DataFrame, config: FeatureConfig | None = None) -> pd.Da
     _add_time_features(df)
     _add_regime_features(df, config)
 
-    return df
+    # ── إضافة استراتيجيات متقدمة ──
+    _add_trend_following_features(df)
+    _add_smc_features(df)
+    _add_breakout_features(df)
+    _add_macro_correlation_features(df)
+
+    return df.dropna().reset_index(drop=True)
 
 
 def _add_multi_horizon_returns(df: pd.DataFrame, horizons: tuple[int, ...] | list[int]) -> None:
@@ -35,7 +47,6 @@ def _add_microstructure_features(df: pd.DataFrame) -> None:
     body = (df["close"] - df["open"]).abs()
     upper_wick = df["high"] - df[["open", "close"]].max(axis=1)
     lower_wick = df[["open", "close"]].min(axis=1) - df["low"]
-
     df["range"] = candle_range
     df["body"] = body
     df["upper_wick"] = upper_wick
@@ -57,27 +68,20 @@ def _add_rolling_statistics(df: pd.DataFrame, config: FeatureConfig) -> None:
         rolling_return = df["return"].rolling(window)
         df[f"return_mean_{window}"] = rolling_return.mean()
         df[f"return_std_{window}"] = rolling_return.std()
-        df[f"return_zscore_{window}"] = (
-            df["return"] - df[f"return_mean_{window}"]
-        ) / df[f"return_std_{window}"]
+        df[f"return_zscore_{window}"] = (df["return"] - df[f"return_mean_{window}"]) / df[f"return_std_{window}"]
         df[f"return_skew_{window}"] = rolling_return.skew()
         df[f"return_kurt_{window}"] = rolling_return.kurt()
 
         df[f"volume_mean_{window}"] = df["volume"].rolling(window).mean()
         df[f"volume_std_{window}"] = df["volume"].rolling(window).std()
-        df[f"volume_zscore_{window}"] = (
-            df["volume"] - df[f"volume_mean_{window}"]
-        ) / df[f"volume_std_{window}"]
+        df[f"volume_zscore_{window}"] = (df["volume"] - df[f"volume_mean_{window}"]) / df[f"volume_std_{window}"]
 
 
 def _add_volatility_measures(df: pd.DataFrame, config: FeatureConfig) -> None:
     for window in config.volatility_windows:
         df[f"volatility_{window}"] = df["log_return"].rolling(window).std()
-
     df["atr"] = _average_true_range(df, window=config.atr_window)
-    df["parkinson_vol"] = (
-        (1 / (4 * np.log(2))) * (np.log(df["high"] / df["low"]) ** 2)
-    ).rolling(config.atr_window).mean().pow(0.5)
+    df["parkinson_vol"] = ((1 / (4 * np.log(2))) * (np.log(df["high"] / df["low"]) ** 2)).rolling(config.atr_window).mean().pow(0.5)
 
 
 def _add_lag_features(df: pd.DataFrame, config: FeatureConfig) -> None:
@@ -93,7 +97,6 @@ def _add_time_features(df: pd.DataFrame) -> None:
     df["minute"] = timestamp.dt.minute
     df["day_of_week"] = timestamp.dt.dayofweek
     df["is_weekend"] = (df["day_of_week"] >= 5).astype(int)
-
     df["session_asia"] = ((df["hour"] >= 0) & (df["hour"] < 7)).astype(int)
     df["session_europe"] = ((df["hour"] >= 7) & (df["hour"] < 15)).astype(int)
     df["session_us"] = ((df["hour"] >= 13) & (df["hour"] < 21)).astype(int)
@@ -103,12 +106,10 @@ def _add_regime_features(df: pd.DataFrame, config: FeatureConfig) -> None:
     window = config.regime_window
     vol = df["log_return"].rolling(window).std()
     trend = df["log_return"].rolling(window).mean()
-
     vol_q_low = vol.rolling(window).quantile(config.regime_quantiles[0])
     vol_q_high = vol.rolling(window).quantile(config.regime_quantiles[1])
     trend_q_low = trend.rolling(window).quantile(config.regime_quantiles[0])
     trend_q_high = trend.rolling(window).quantile(config.regime_quantiles[1])
-
     df["vol_regime"] = np.select(
         [vol < vol_q_low, vol > vol_q_high],
         [0, 2],
@@ -127,3 +128,63 @@ def _average_true_range(df: pd.DataFrame, window: int = 14) -> pd.Series:
     low_close = (df["low"] - df["close"].shift()).abs()
     true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return true_range.rolling(window).mean()
+
+
+# ────────────────────────────────────────────────────────────────
+#               إضافة ميزات الاستراتيجيات المتقدمة
+# ────────────────────────────────────────────────────────────────
+
+
+def _add_trend_following_features(df: pd.DataFrame) -> None:
+    """Trend Following: EMA crossover + directional strength"""
+    df["ema_fast"] = df["close"].ewm(span=12, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=26, adjust=False).mean()
+    df["macd"] = df["ema_fast"] - df["ema_slow"]
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    df["macd_hist"] = df["macd"] - df["macd_signal"]
+    
+    # Trend direction (1 = up, -1 = down, 0 = neutral)
+    df["trend_dir"] = np.where(df["ema_fast"] > df["ema_slow"], 1,
+                              np.where(df["ema_fast"] < df["ema_slow"], -1, 0))
+
+
+def _add_smc_features(df: pd.DataFrame) -> None:
+    """Smart Money Concepts: Fair Value Gaps + simple Order Block proxy"""
+    # Bullish FVG: low[2] > high[0] → gap up
+    df["bull_fvg"] = ((df["low"].shift(2) > df["high"]) & (df["close"] > df["open"])).astype(int)
+    # Bearish FVG: high[2] < low[0] → gap down
+    df["bear_fvg"] = ((df["high"].shift(2) < df["low"]) & (df["close"] < df["open"])).astype(int)
+    
+    # Simple Order Block proxy: previous swing high/low zones
+    df["swing_high"] = df["high"].rolling(20).max().shift(1)
+    df["swing_low"]  = df["low"].rolling(20).min().shift(1)
+    df["in_bull_ob"] = (df["close"] >= df["swing_low"]).astype(int)   # داخل منطقة دعم سابقة
+    df["in_bear_ob"] = (df["close"] <= df["swing_high"]).astype(int)  # داخل منطقة مقاومة سابقة
+
+
+def _add_breakout_features(df: pd.DataFrame) -> None:
+    """Breakout: Donchian channels + volatility filter"""
+    period = 20
+    df["donchian_high"] = df["high"].rolling(period).max().shift(1)
+    df["donchian_low"]  = df["low"].rolling(period).min().shift(1)
+    
+    # Breakout signals
+    df["breakout_up"]   = (df["close"] > df["donchian_high"]).astype(int)
+    df["breakout_down"] = (df["close"] < df["donchian_low"]).astype(int)
+    
+    # Volatility-adjusted breakout (only when ATR high)
+    atr = _average_true_range(df, 14)
+    df["vol_adjust_break_up"] = ((df["breakout_up"] == 1) & (atr > atr.rolling(50).mean())).astype(int)
+    df["vol_adjust_break_down"] = ((df["breakout_down"] == 1) & (atr > atr.rolling(50).mean())).astype(int)
+
+
+def _add_macro_correlation_features(df: pd.DataFrame) -> None:
+    """Macro correlations if columns exist (DXY, VIX, US10Y, etc.)"""
+    window = 60  # ~3 months on H1
+    macro_cols = ["dxy_close", "vix_close", "us10y_close", "spx_close"]
+    
+    for col in macro_cols:
+        if col in df.columns:
+            df[f"gold_{col}_corr"] = df["close"].rolling(window).corr(df[col])
+            # Direction of correlation change
+            df[f"gold_{col}_corr_diff"] = df[f"gold_{col}_corr"].diff()
