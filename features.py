@@ -6,17 +6,16 @@ from utils import FeatureConfig
 
 def add_features(df: pd.DataFrame, config: FeatureConfig | None = None) -> pd.DataFrame:
     """
-    إضافة جميع الميزات المتقدمة المستوحاة من استراتيجيات حديثة:
-    - Trend Following (EMA + breakout)
-    - SMC (FVG + Order Blocks تقريبية + Liquidity proxy)
-    - Breakout (Donchian + volatility-adjusted)
-    - Macro correlations (إذا كانت البيانات موجودة)
-    - الميزات الأصلية (returns, microstructure, rolling stats, volatility, lags, time, regime)
+    إضافة كل الميزات الأساسية + المتقدمة من الاستراتيجيات:
+    - Trend Following (EMA, MACD)
+    - SMC (FVG, simple Order Blocks)
+    - Breakout (Donchian + volatility filter)
+    - Macro correlations (DXY, VIX, US10Y إذا متوفرة)
     """
     config = config or FeatureConfig()
     df = df.copy()
 
-    # ── الميزات الأساسية الأصلية ──
+    # ── الميزات الأساسية (الأصلية) ──
     df["return"] = df["close"].pct_change()
     df["log_return"] = np.log(df["close"]).diff()
     _add_multi_horizon_returns(df, config.horizons)
@@ -27,14 +26,19 @@ def add_features(df: pd.DataFrame, config: FeatureConfig | None = None) -> pd.Da
     _add_time_features(df)
     _add_regime_features(df, config)
 
-    # ── إضافة استراتيجيات متقدمة ──
+    # ── الميزات المتقدمة من الاستراتيجيات ──
     _add_trend_following_features(df)
     _add_smc_features(df)
     _add_breakout_features(df)
     _add_macro_correlation_features(df)
 
+    # تنظيف NaN الناتجة عن الـ rolling/shift
     return df.dropna().reset_index(drop=True)
 
+
+# ────────────────────────────────────────────────────────────────
+#               الدوال الأساسية (كما كانت)
+# ────────────────────────────────────────────────────────────────
 
 def _add_multi_horizon_returns(df: pd.DataFrame, horizons: tuple[int, ...] | list[int]) -> None:
     for horizon in horizons:
@@ -131,60 +135,63 @@ def _average_true_range(df: pd.DataFrame, window: int = 14) -> pd.Series:
 
 
 # ────────────────────────────────────────────────────────────────
-#               إضافة ميزات الاستراتيجيات المتقدمة
+#               الميزات المتقدمة من الاستراتيجيات
 # ────────────────────────────────────────────────────────────────
 
 
 def _add_trend_following_features(df: pd.DataFrame) -> None:
-    """Trend Following: EMA crossover + directional strength"""
+    """Trend Following + MACD"""
     df["ema_fast"] = df["close"].ewm(span=12, adjust=False).mean()
     df["ema_slow"] = df["close"].ewm(span=26, adjust=False).mean()
     df["macd"] = df["ema_fast"] - df["ema_slow"]
     df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
     df["macd_hist"] = df["macd"] - df["macd_signal"]
     
-    # Trend direction (1 = up, -1 = down, 0 = neutral)
+    # EMA crossover direction
     df["trend_dir"] = np.where(df["ema_fast"] > df["ema_slow"], 1,
                               np.where(df["ema_fast"] < df["ema_slow"], -1, 0))
 
 
 def _add_smc_features(df: pd.DataFrame) -> None:
-    """Smart Money Concepts: Fair Value Gaps + simple Order Block proxy"""
-    # Bullish FVG: low[2] > high[0] → gap up
+    """Fair Value Gaps + simple Order Block proxy"""
+    # Bullish/Bearish FVG
     df["bull_fvg"] = ((df["low"].shift(2) > df["high"]) & (df["close"] > df["open"])).astype(int)
-    # Bearish FVG: high[2] < low[0] → gap down
     df["bear_fvg"] = ((df["high"].shift(2) < df["low"]) & (df["close"] < df["open"])).astype(int)
     
-    # Simple Order Block proxy: previous swing high/low zones
+    # Order Block proxy (previous swing levels)
     df["swing_high"] = df["high"].rolling(20).max().shift(1)
     df["swing_low"]  = df["low"].rolling(20).min().shift(1)
-    df["in_bull_ob"] = (df["close"] >= df["swing_low"]).astype(int)   # داخل منطقة دعم سابقة
-    df["in_bear_ob"] = (df["close"] <= df["swing_high"]).astype(int)  # داخل منطقة مقاومة سابقة
+    df["in_bull_ob"] = (df["close"] >= df["swing_low"]).astype(int)
+    df["in_bear_ob"] = (df["close"] <= df["swing_high"]).astype(int)
 
 
 def _add_breakout_features(df: pd.DataFrame) -> None:
-    """Breakout: Donchian channels + volatility filter"""
+    """Donchian Breakout + volatility filter"""
     period = 20
     df["donchian_high"] = df["high"].rolling(period).max().shift(1)
     df["donchian_low"]  = df["low"].rolling(period).min().shift(1)
     
-    # Breakout signals
     df["breakout_up"]   = (df["close"] > df["donchian_high"]).astype(int)
     df["breakout_down"] = (df["close"] < df["donchian_low"]).astype(int)
     
-    # Volatility-adjusted breakout (only when ATR high)
+    # Volatility-adjusted (stronger breakout when vol > avg)
     atr = _average_true_range(df, 14)
-    df["vol_adjust_break_up"] = ((df["breakout_up"] == 1) & (atr > atr.rolling(50).mean())).astype(int)
-    df["vol_adjust_break_down"] = ((df["breakout_down"] == 1) & (atr > atr.rolling(50).mean())).astype(int)
+    atr_avg = atr.rolling(50).mean()
+    df["strong_break_up"]   = ((df["breakout_up"] == 1) & (atr > atr_avg)).astype(int)
+    df["strong_break_down"] = ((df["breakout_down"] == 1) & (atr > atr_avg)).astype(int)
 
 
 def _add_macro_correlation_features(df: pd.DataFrame) -> None:
-    """Macro correlations if columns exist (DXY, VIX, US10Y, etc.)"""
-    window = 60  # ~3 months on H1
-    macro_cols = ["dxy_close", "vix_close", "us10y_close", "spx_close"]
+    """Rolling correlation with macro assets (if columns exist)"""
+    window = 60
+    macro_pairs = [
+        ("dxy_close", "gold_dxy_cor"),
+        ("vix_close", "gold_vix_cor"),
+        ("us10y_close", "gold_us10y_cor"),
+        ("spx_close", "gold_spx_cor")
+    ]
     
-    for col in macro_cols:
-        if col in df.columns:
-            df[f"gold_{col}_corr"] = df["close"].rolling(window).corr(df[col])
-            # Direction of correlation change
-            df[f"gold_{col}_corr_diff"] = df[f"gold_{col}_corr"].diff()
+    for macro_col, cor_col in macro_pairs:
+        if macro_col in df.columns:
+            df[cor_col] = df["close"].rolling(window).corr(df[macro_col])
+            df[f"{cor_col}_diff"] = df[cor_col].diff()  # تغير الارتباط
