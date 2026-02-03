@@ -54,7 +54,7 @@ def _compute_fold_metrics(
         y_pred = prediction.y_pred
         future_returns = df.loc[prediction.indices, "future_return"].fillna(0).values
         positions = y_pred
-        strategy_returns = future_returns * positions
+        strategy_returns = _apply_transaction_costs(future_returns, positions)
         equity_curve = (1 + strategy_returns).cumprod()
         drawdown = compute_drawdown(pd.Series(equity_curve))
 
@@ -143,7 +143,10 @@ def _combine_predictions(df: pd.DataFrame, predictions: List[FoldPrediction]) ->
         data["position"] = prediction.y_pred
         rows.append(data)
     combined = pd.concat(rows).sort_values("timestamp")
-    combined["strategy_returns"] = combined["future_return"].fillna(0) * combined["position"]
+    combined["strategy_returns"] = _apply_transaction_costs(
+        combined["future_return"].fillna(0).to_numpy(),
+        combined["position"].to_numpy(),
+    )
     return combined
 
 
@@ -181,3 +184,15 @@ def _sharpe_like(strategy_returns: np.ndarray) -> float:
     if std == 0:
         return 0.0
     return float(mean / std * np.sqrt(252 * 288))
+
+
+def _apply_transaction_costs(
+    future_returns: np.ndarray,
+    positions: np.ndarray,
+    cost_bps: float = 2.0,
+) -> np.ndarray:
+    if future_returns.size == 0:
+        return future_returns
+    position_changes = np.diff(positions, prepend=0)
+    costs = np.abs(position_changes) * (cost_bps / 10000)
+    return future_returns * positions - costs
