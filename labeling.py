@@ -39,6 +39,7 @@ def add_labels(
     df["label"] = 0
     df.loc[df["future_return"] > threshold, "label"] = 1
     df.loc[df["future_return"] < -threshold, "label"] = -1
+    df["sample_weight"] = 1.0
 
     if not use_context:
         df = df.dropna(subset=["future_return", "label"]).reset_index(drop=True)
@@ -51,17 +52,17 @@ def add_labels(
     if "bull_fvg" in df.columns and "bear_fvg" in df.columns:
         bull_fvg_mask = (df["bull_fvg"] == 1) & (df["future_return"] > 0)
         bear_fvg_mask = (df["bear_fvg"] == 1) & (df["future_return"] < 0)
-        
-        df.loc[bull_fvg_mask, "future_return"] *= fvg_boost
-        df.loc[bear_fvg_mask, "future_return"] *= fvg_boost
+
+        df.loc[bull_fvg_mask, "sample_weight"] *= fvg_boost
+        df.loc[bear_fvg_mask, "sample_weight"] *= fvg_boost
 
     # 2. Breakout → تضخيم الإشارات بعد breakout قوي
     if "breakout_up" in df.columns and "breakout_down" in df.columns:
         up_break_mask = (df["breakout_up"] == 1) & (df["future_return"] > 0)
         down_break_mask = (df["breakout_down"] == 1) & (df["future_return"] < 0)
-        
-        df.loc[up_break_mask, "future_return"] *= breakout_boost
-        df.loc[down_break_mask, "future_return"] *= breakout_boost
+
+        df.loc[up_break_mask, "sample_weight"] *= breakout_boost
+        df.loc[down_break_mask, "sample_weight"] *= breakout_boost
 
     # 3. Trend strength filter → إلغاء الإشارات المعاكسة للاتجاه المهيمن
     if "trend_dir" in df.columns:
@@ -80,7 +81,7 @@ def add_labels(
         # الذهب يرتفع عادة عندما يضعف الدولار (correlation سلبي)
         inverse_corr_mask = df["gold_dxy_corr"] < macro_min_corr
         # تقليل ثقة الإشارات في حالة ارتباط ضعيف أو إيجابي
-        df.loc[~inverse_corr_mask & (df["label"] != 0), "label"] *= 0.6
+        df.loc[~inverse_corr_mask & (df["label"] != 0), "sample_weight"] *= 0.6
 
     # ── إعادة حساب الـ label النهائي بعد التعديلات ──
     df["label"] = np.select(
